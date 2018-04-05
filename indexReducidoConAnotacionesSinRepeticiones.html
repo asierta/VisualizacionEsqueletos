@@ -1,0 +1,286 @@
+<html lang="en">
+<head>
+    <title>three.js webgl - animation - skinning</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+    <style>
+        body {
+            color: #fff;
+            font-family: Monospace;
+            font-size: 13px;
+            text-align: center;
+            background-color: #fff;
+            margin: 0px;
+            overflow: hidden;
+        }
+
+        #info {
+            position: absolute;
+            top: 0px;
+            width: 100%;
+            padding: 5px;
+        }
+
+        a {
+            color: #bbb;
+        }
+
+        #canvas2D{
+            background-color:#333333;
+            position: absolute;
+            left: 0;
+            top: 0;
+            z-index: -1;
+        }
+    </style>
+</head>
+<body>
+<div id="container"></div>
+<div id="info">
+    <br><br>camera orbit/zoom/pan with left/middle/right mouse button
+</div>
+<canvas id="canvas2D"></canvas>
+
+<script src="js/three.js"></script>
+<script src="js/Detector.js"></script>
+<script src="js/stats.min.js"></script>
+<script src="js/OrbitControls.js"></script>
+<script src="js/dat.gui.min.js"></script>
+<script src="js/lodash.js"></script>
+<script src="js/CanvasRenderer.js"></script>
+
+
+<script>
+
+    if (!Detector.webgl) Detector.addGetWebGLMessage();
+    var container = document.getElementById('container');
+    var scene, renderer, camera, controls, stats;
+    var mesh, skeleton, mixer;
+    var walkAction;
+    var walkWeight;
+    var settings;
+    var clock = new THREE.Clock();
+    var url = 'js/11165201033_cam1.json';
+    var JSONfile;
+    var canvas2D, ctx2d;
+    var huesosConAnotacion = new Array(25);
+    var huesosInferidos = new Array(25);
+    for (var i = 0; i < huesosInferidos.length; i++) { //inicializar array
+        huesosInferidos[i] = 0;
+        huesosConAnotacion[i] = "";
+    }
+
+    readTextFile(url, function(text){
+        JSONfile = JSON.parse(text);
+        console.log(JSONfile);
+    });
+    // Initialize stats (fps display)
+    stats = new Stats();
+    container.appendChild(stats.dom);
+    // Initialize scene, light and renderer
+    scene = new THREE.Scene();
+    // scene.background = new THREE.Color(0x333333);
+    scene.add(new THREE.AmbientLight(0xffffff));
+    renderer = new THREE.WebGLRenderer({antialias: true, alpha: true});
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    canvas2D = document.getElementById("canvas2D");
+    ctx2d = canvas2D.getContext('2d');
+    canvas2D.width = window.innerWidth;
+    canvas2D.height = window.innerHeight;
+    // renderer2D = new THREE.CanvasRenderer({canvas: canvas2D});
+    container.appendChild(renderer.domElement);
+    // Load skinned mesh
+    new THREE.ObjectLoader().load(url, function (loadedObject) {
+        loadedObject.traverse(function (child) {
+            if (child instanceof THREE.SkinnedMesh) {
+                mesh = child;
+                // console.log(mesh);
+            }
+        });
+        if (mesh === undefined) {
+            alert('Unable to find a SkinnedMesh in this place:\n\n' + url + '\n\n');
+            return;
+        }
+        // Add mesh and skeleton helper to scene
+        mesh.rotation.y = -135 * Math.PI / 180;
+        scene.add(mesh);
+        skeleton = new THREE.SkeletonHelper(mesh);
+        scene.add(skeleton);
+        // Initialize camera and camera controls
+        var radius = mesh.geometry.boundingSphere.radius;
+        var aspect = window.innerWidth / window.innerHeight;
+        camera = new THREE.PerspectiveCamera(45, aspect, 1, 10000);
+        camera.position.set(0.0, radius, radius * 9);
+        controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.addEventListener('change', function() {//Cuando se mueva la camara se llamará a onCameraChange
+            onCameraChange();
+        });
+        controls.target.set(0, radius, 0);
+        controls.update();
+        // Create the control panel
+        createPanel();
+        // Initialize mixer and clip actions
+        mixer = new THREE.AnimationMixer(mesh);
+        walkAction = mixer.clipAction('walk');
+        walkAction.play(); //Activar animacion Walk
+        // Listen on window resizing and start the render loop
+        window.addEventListener('resize', onWindowResize, false);
+        animate();
+    });
+
+    function createPanel() {
+        var panel = new dat.GUI({width: 310});
+        var folder1 = panel.addFolder('Controls');
+        settings = {
+            'show skeleton': true,
+            'pause/continue': pauseContinue
+        };
+        folder1.add(settings, 'show skeleton').onChange(showSkeleton);
+        folder1.add(settings, 'pause/continue');
+        folder1.open();
+    }
+
+    function showSkeleton(visibility) {
+        skeleton.visible = visibility;
+    }
+
+    function pauseContinue() {
+        walkAction.paused = !walkAction.paused;
+    }
+
+    function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        canvas2D.width = window.innerWidth;
+        canvas2D.height = window.innerHeight;
+        limpiarCanvas();
+        pintarInferidos();
+        pintarAnotaciones();
+    }
+
+    function animate() {
+        // Render loop
+        requestAnimationFrame(animate);
+        walkWeight = walkAction.getEffectiveWeight();
+        // Get the time elapsed since the last frame, used for mixer update
+        var mixerUpdateDelta = clock.getDelta();
+        // Update the animation mixer, the stats panel, and render this frame
+        mixer.update(mixerUpdateDelta);
+        var boneWorldPosition;
+        var bone;
+        var position2D;
+        if (!walkAction.paused && JSONfile != null) {
+            var keyframes = [];
+            for (var i = 0; i < 25; i++) {//Obtenemos el keyframe más cercano al segundo de animación actual
+                var filtrado = _.filter(JSONfile.geometries[0].data.animation.hierarchy[i].keys, function (o) {
+                    return o.time <= walkAction.time;
+                });
+                var ultimoKeyframe = filtrado.pop();
+                huesosInferidos[i] = ultimoKeyframe.inf === 1 ? 1 : 0; //Para cada hueso guardamos si ha sido inferido o no en ese instante de animacion
+                if (ultimoKeyframe.info) {//si el keyframe tiene información la mostramos
+                    var text = "Hueso " + i + " " + ultimoKeyframe.info;
+                    huesosConAnotacion[i] = text;
+                }else{
+                    huesosConAnotacion[i] = "";
+                }
+            }
+            limpiarCanvas();
+            pintarInferidos();
+            pintarAnotaciones();
+        }
+        stats.update();
+
+        // mesh.lookAt(camera.position); //Que el esqueleto siempre mire a la camara
+        renderer.render(scene, camera);
+    }
+
+    function readTextFile(file, callback) {
+        var rawFile = new XMLHttpRequest();
+        rawFile.overrideMimeType("application/json");
+        rawFile.open("GET", file, true);
+        rawFile.onreadystatechange = function() {
+            if (rawFile.readyState === 4 && rawFile.status == "200") {
+                callback(rawFile.responseText);
+            }
+        };
+        rawFile.send(null);
+    }
+
+    function createVector(x, y, z, camera, width, height) {
+        var p = new THREE.Vector3(x, y, z);
+        var vector = p.project(camera);
+
+        vector.x = (vector.x + 1) / 2 * width;
+        vector.y = -(vector.y - 1) / 2 * height;
+
+        return vector;
+    }
+
+    function toScreenPosition(obj, camera)
+    {
+        var vector = new THREE.Vector3();
+
+        var widthHalf = 0.5*renderer.context.canvas.width;
+        var heightHalf = 0.5*renderer.context.canvas.height;
+
+        obj.updateMatrixWorld();
+        vector.setFromMatrixPosition(obj.matrixWorld);
+        vector.project(camera);
+
+        vector.x = ( vector.x * widthHalf ) + widthHalf;
+        vector.y = - ( vector.y * heightHalf ) + heightHalf;
+
+        return {
+            x: vector.x,
+            y: vector.y
+        };
+
+    }
+
+    function onCameraChange()
+    {
+        limpiarCanvas();
+        pintarInferidos();
+        pintarAnotaciones();
+    }
+
+    function limpiarCanvas() {
+        ctx2d.clearRect(0, 0, canvas2D.width, canvas2D.height);
+    }
+
+    function pintarInferidos() {
+        var bone, pos;
+        for (var i = 0; i < huesosInferidos.length; i++) {
+            if(huesosInferidos[i] === 1){
+                bone = mesh.skeleton.bones[i];
+                pos = toScreenPosition(bone, camera);
+                ctx2d.beginPath();
+                ctx2d.arc(pos.x, pos.y, 5, 0, 2 * Math.PI, false);
+                ctx2d.fillStyle = 'red';
+                ctx2d.fill();
+                ctx2d.lineWidth = 5;
+                ctx2d.strokeStyle = '#f71311';
+                ctx2d.stroke();
+            }
+        }
+    }
+
+    function  pintarAnotaciones() {
+        var pos, bone;
+        for (var i = 0; i < huesosConAnotacion.length; i++) {
+            if(huesosConAnotacion[i] != ""){
+                bone = mesh.skeleton.bones[i];
+                pos = toScreenPosition(bone, camera);
+                ctx2d.fillStyle = "red";
+                ctx2d.font = "15px Arial";
+                ctx2d.textAlign = "center";
+                ctx2d.fillText(huesosConAnotacion[i], pos.x, pos.y);
+            }
+        }
+    }
+</script>
+
+</body>
+</html>
